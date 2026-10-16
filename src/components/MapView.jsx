@@ -151,19 +151,37 @@ export default function MapView({
         {pairs.map((k) => {
           const [a, b] = k.split('|');
           if (!pos.has(a) || !pos.has(b)) return null;
+          const nameA = hubs.find((h) => h.hubId === a)?.name || a;
+          const nameB = hubs.find((h) => h.hubId === b)?.name || b;
+          const edgeObj = edges.find((e) => e.pairKey === k);
+          const distKm = edgeObj?.distanceKm;
           const st = edgeStatus(k, scenario);
           return (
             <Polyline
               key={k}
               positions={[pos.get(a), pos.get(b)]}
               pathOptions={st.blocked
-                ? { color: '#dc2626', weight: 4, dashArray: '4 8', opacity: 0.9 }
+                ? { color: '#dc2626', weight: 5, dashArray: '6 8', opacity: 0.95 }
                 : { color: '#64748b', weight: 3, opacity: 0.65 }
               }
             >
               <Tooltip sticky className="edge-tooltip">
-                <div style={{ fontWeight: 700, fontSize: '12px' }}>{a} ↔ {b}</div>
-                {st.blocked && <div style={{ color: '#dc2626', fontWeight: 600 }}>BLOCKED / UNAVAILABLE (simulated)</div>}
+                <div style={{ fontWeight: 800, fontSize: '13px', color: st.blocked ? '#dc2626' : '#0f172a' }}>
+                  {nameA} → {nameB}
+                </div>
+                <div style={{ fontSize: '11px', color: '#64748b', marginBottom: '4px' }}>
+                  Direct Road Connection · {distKm ? `${distKm} km` : ''}
+                </div>
+                {st.blocked && (
+                  <div style={{ color: '#dc2626', fontWeight: 700, fontSize: '12px', background: '#fee2e2', padding: '2px 6px', borderRadius: '4px', marginBottom: '4px' }}>
+                    ⛔ ROAD BLOCKED: {st.roadBlockReason || 'Road unavailable (Admin Block)'}
+                  </div>
+                )}
+                {st.delayed && (
+                  <div style={{ color: '#d97706', fontWeight: 600, fontSize: '11px' }}>
+                    ⏱️ Traffic delay reported
+                  </div>
+                )}
                 <div style={{ fontSize: '11px', color: '#475569', marginTop: '2px' }}>
                   {st.services.map((x) => (
                     <div key={x.lineId}>{x.lineId} ({x.mode}){x.reason ? ` ✕ ${x.reason}` : ''}</div>

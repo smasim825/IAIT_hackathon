@@ -9,7 +9,19 @@ export const CONFIG = {
   transferWait: 6, transferWalkMetro: 5, transferWalkOther: 2,
   weights: { time: 0.5, fare: 0.3, transfers: 0.2 }, // S = .5(T/60)+.3(F/100)+.2(X/3)
 };
-export const DEFAULT_SCENARIO = { rushHour: false, rainSeverity: 0, rainHubs: [], blockedHubs: [], disabledLines: [], disabledEdges: [], delays: [] };
+export const DEFAULT_SCENARIO = {
+  rushHour: false,
+  rainSeverity: 0,
+  rainHubs: [],
+  blockedHubs: [],
+  disabledLines: [],
+  disabledEdges: [], // [pairKey] blocked direct road connections
+  blockedEdges: [],  // Alias for disabledEdges
+  edgeStatuses: {},  // [pairKey]: { status: 'normal'|'blocked'|'delayed', reason, reasonLabel, delayMin }
+  delays: [],
+  trafficSegments: [],
+  lineStatuses: {}, // [lineId]: { status: 'normal'|'blocked'|'delayed', blockReason, blockReasonLabel, delayReason, delayReasonLabel, delayMin, priceSurge }
+};
 
 const hubIds = new Set(HUBS.map((h) => h.hubId));
 const adj = new Map();
@@ -18,11 +30,41 @@ EDGES.forEach((e) => { if (!adj.has(e.fromHubId)) adj.set(e.fromHubId, []); adj.
 const norm = (s) => ({ ...DEFAULT_SCENARIO, ...(s || {}) });
 const rainAffects = (e, s) => s.rainSeverity > 0 && (!s.rainHubs.length || s.rainHubs.includes(e.fromHubId) || s.rainHubs.includes(e.toHubId));
 
+export function isEdgeBlocked(e, s) {
+  if (!e || !s) return false;
+  const pk = e.pairKey || [e.fromHubId, e.toHubId].sort().join('|');
+  const fromTo = `${e.fromHubId}|${e.toHubId}`;
+  const toFrom = `${e.toHubId}|${e.fromHubId}`;
+  return Boolean(
+    s.disabledEdges?.includes(pk) ||
+    s.disabledEdges?.includes(fromTo) ||
+    s.disabledEdges?.includes(toFrom) ||
+    s.blockedEdges?.includes(pk) ||
+    s.blockedEdges?.includes(fromTo) ||
+    s.blockedEdges?.includes(toFrom) ||
+    s.edgeStatuses?.[pk]?.status === 'blocked' ||
+    s.edgeStatuses?.[fromTo]?.status === 'blocked' ||
+    s.edgeStatuses?.[toFrom]?.status === 'blocked'
+  );
+}
+
 /** Returns a reason string if a service cannot be used, else null. */
 export function serviceBlockReason(e, svc, s, c = {}) {
   if (!svc.isEnabled) return `${svc.lineId} is disabled`;
-  if (s.disabledLines.includes(svc.lineId)) return `${svc.lineId} is disabled (scenario)`;
-  if (s.disabledEdges.includes(e.pairKey)) return 'connection is blocked (scenario)';
+  if (s.disabledLines?.includes(svc.lineId)) return `${svc.lineId} is disabled (scenario)`;
+
+  // Check direct road connection blockade set by Admin
+  if (isEdgeBlocked(e, s)) {
+    const pk = e.pairKey || [e.fromHubId, e.toHubId].sort().join('|');
+    const edgeObj = s.edgeStatuses?.[pk] || s.edgeStatuses?.[`${e.fromHubId}|${e.toHubId}`];
+    return `road connection is blocked: ${edgeObj?.reasonLabel || edgeObj?.reason || 'admin road block'}`;
+  }
+
+  // Check per-line blockade status set by Admin
+  const ls = s.lineStatuses?.[svc.lineId];
+  if (ls && ls.status === 'blocked') {
+    return `${svc.lineId} blocked: ${ls.blockReasonLabel || ls.blockReason || 'path closed'}`;
+  }
 
   // User-selectable transport mode filters (Local Bus, MRT-6 Metro, Leguna, Rickshaw, Walking)
   if (c.allowedModes && c.allowedModes.length > 0) {
@@ -31,30 +73,54 @@ export function serviceBlockReason(e, svc, s, c = {}) {
   }
 
   if (c.avoidModes?.includes(svc.mode)) return `mode ${svc.mode} avoided`;
-  if (s.rainSeverity >= 2 && rainAffects(e, s) && ['bus', 'leguna'].includes(svc.mode)) return 'heavy rain suspends buses';
   return null;
 }
 
-/** T = ceil(base*(1+D)*rush*rain + A) */
+/** T = ceil(base*(1+D)*rush*rain*traffic + A + lineDelay) */
 export function segTime(svc, e, scn) {
   const s = norm(scn);
-  const d = s.delays.find((x) => x.lineId === svc.lineId) || { rate: 0, extra: 0 };
+  const d = s.delays?.find((x) => x.lineId === svc.lineId) || { rate: 0, extra: 0 };
   const rush = s.rushHour && !['metro', 'walking'].includes(svc.mode) ? CONFIG.rushMult : 1;
   const rain = rainAffects(e, s) ? CONFIG.rainTimeMult[s.rainSeverity]?.[svc.mode] ?? 1 : 1;
-  return Math.ceil(svc.baseTimeMinutes * (1 + d.rate) * rush * rain + d.extra - 1e-9);
+
+  // Segment-specific road traffic: if traffic is reported on this specific segment C <-> D
+  const hasTraffic = (s.trafficSegments || []).includes(e.pairKey) && !['metro', 'walking'].includes(svc.mode);
+  const trafficMult = hasTraffic ? 1.8 : 1.0;
+  const trafficExtra = hasTraffic ? 8 : 0; // +8 min delay on that specific corridor
+
+  // Line-specific delay set by Admin Dispatcher (+5m, +10m, +15m, etc.)
+  const ls = s.lineStatuses?.[svc.lineId];
+  const lineDelayExtra = (ls && ls.status === 'delayed') ? (Number(ls.delayMin) || 0) : 0;
+
+  return Math.ceil(svc.baseTimeMinutes * (1 + d.rate) * rush * rain * trafficMult + d.extra + trafficExtra + lineDelayExtra - 1e-9);
 }
 
 export function legFare(leg, scn, student) {
   const s = norm(scn), km = leg.km;
   let min = 0, max = 0;
-  if (leg.mode === 'bus') { min = max = Math.max(10, Math.round(2.7 * km)); if (student) min = max = Math.max(10, Math.ceil(min / 2)); }
-  else if (leg.mode === 'metro') { min = max = Math.min(100, Math.max(20, Math.round(km) * 5)); } // provisional
-  else if (leg.mode === 'leguna') { min = 10; max = 20; }
-  else if (leg.mode === 'rickshaw' || leg.mode === 'cng') {
+  if (leg.mode === 'bus') {
+    min = max = Math.max(10, Math.round(2.7 * km));
+    if (student) min = max = Math.max(10, Math.ceil(min / 2));
+    // CRITICAL: Bus fares are strictly fixed by BRTA - NO price surge allowed!
+  } else if (leg.mode === 'metro') {
+    min = max = Math.min(100, Math.max(20, Math.round(km) * 5));
+    // CRITICAL: Metro fares are strictly fixed by DMTCL - NO price surge allowed!
+  } else if (leg.mode === 'leguna') {
+    min = 10;
+    max = 20;
+  } else if (leg.mode === 'rickshaw' || leg.mode === 'cng') {
     const [a, b, lo, hi] = leg.mode === 'rickshaw' ? [15, 25, 20, 30] : [30, 45, 40, 60];
-    min = Math.max(lo, Math.round(km * a)); max = Math.max(hi, Math.round(km * b));
+    min = Math.max(lo, Math.round(km * a));
+    max = Math.max(hi, Math.round(km * b));
     if (leg.rainAffected) { min = Math.round(min * 1.2); max = Math.round(max * 1.5); }
     if (s.rushHour) max = Math.round(max * 1.2);
+
+    // CRITICAL: Price rise (+10tk, +20tk, +30tk) applies ONLY to Rickshaw and CNG!
+    const ls = s.lineStatuses?.[leg.lineId];
+    if (ls && ls.status === 'delayed' && ls.priceSurge) {
+      min += Number(ls.priceSurge);
+      max += Number(ls.priceSurge);
+    }
   }
   return { min, max };
 }
@@ -130,6 +196,10 @@ function search(origin, dest, c, s) {
       if (seen.has(n)) continue;
       if (n !== dest && s.blockedHubs.includes(n)) { rej('blocked hub'); continue; }
       if (n !== dest && c.avoidHubs?.includes(n)) { rej('avoided hub'); continue; }
+
+      // Direct road connection blockade check
+      if (isEdgeBlocked(e, s)) { rej('blocked road'); continue; }
+
       seen.add(n); path.push(e); dfs(n); path.pop(); seen.delete(n);
     }
   };
@@ -150,9 +220,19 @@ function budgetStatus(r, budget) {
   return r.fare.max <= budget ? 'WITHIN_BUDGET' : r.fare.est <= budget ? 'ESTIMATED_WITHIN_BUDGET' : 'OVER_BUDGET';
 }
 
-function reachable(o, d) {
+function reachable(o, d, s = {}) {
   const q = [o], seen = new Set([o]);
-  while (q.length) { const h = q.shift(); if (h === d) return true; (adj.get(h) || []).forEach((e) => { if (!seen.has(e.toHubId)) { seen.add(e.toHubId); q.push(e.toHubId); } }); }
+  while (q.length) {
+    const h = q.shift();
+    if (h === d) return true;
+    (adj.get(h) || []).forEach((e) => {
+      if (seen.has(e.toHubId)) return;
+      if (e.toHubId !== d && s.blockedHubs?.includes(e.toHubId)) return;
+      if (isEdgeBlocked(e, s)) return;
+      seen.add(e.toHubId);
+      q.push(e.toHubId);
+    });
+  }
   return false;
 }
 
@@ -162,16 +242,43 @@ export function findRoutes(origin, destination, constraints = {}, scenario = {})
   if (!hubIds.has(origin) || !hubIds.has(destination)) return { ...base, status: 'INVALID_INPUT', message: 'Unknown origin or destination hub.' };
   if (origin === destination) return { ...base, status: 'SAME_LOCATION', message: 'Origin and destination are the same.' };
 
+  const directPairKey = [origin, destination].sort().join('|');
+  const directEdge = EDGES.find((e) => e.pairKey === directPairKey);
+  const isDirectRoad = Boolean(directEdge);
+  const directBlocked = isDirectRoad && isEdgeBlocked(directEdge, s);
+
   const { cands, stats } = search(origin, destination, c, s);
-  const withBudget = cands.map((r) => ({ ...r, budgetStatus: budgetStatus(r, c.maxBudget) }));
+  let withBudget = cands.map((r) => ({ ...r, budgetStatus: budgetStatus(r, c.maxBudget) }));
+
+  // If user requested direct corridor only and direct road is blocked, exclude multi-hop detours
+  if (c.directOnly && directBlocked) {
+    withBudget = withBudget.filter((r) => r.hubIds.length <= 2);
+  }
+
   const ok = c.maxBudget == null ? withBudget : withBudget.filter((r) => r.budgetStatus === 'WITHIN_BUDGET'); // strict: max fare must fit
-  const res = { ...base, stats, candidateCount: ok.length };
+  const res = {
+    ...base,
+    stats,
+    candidateCount: ok.length,
+    isDirectRoadBlocked: directBlocked,
+    directPairKey,
+    directRoadBlockReason: directBlocked ? (s.edgeStatuses?.[directPairKey]?.reasonLabel || s.edgeStatuses?.[directPairKey]?.reason || 'Road Block') : null,
+  };
 
   if (!ok.length) {
     res.overBudgetCheapest = best('cheapest', withBudget);
-    res.status = !reachable(origin, destination) ? 'NO_ROUTE_IN_MODELED_NETWORK' : stats.complete ? 'NO_ROUTE_WITHIN_CONSTRAINTS' : 'SEARCH_INCOMPLETE';
+    res.status = !reachable(origin, destination, s) ? 'NO_ROUTE_IN_MODELED_NETWORK' : stats.complete ? 'NO_ROUTE_WITHIN_CONSTRAINTS' : 'SEARCH_INCOMPLETE';
+    const hasBlockedRoads =
+      (s.disabledEdges && s.disabledEdges.length > 0) ||
+      (s.blockedEdges && s.blockedEdges.length > 0) ||
+      Object.values(s.edgeStatuses || {}).some((x) => x.status === 'blocked');
+
     if (res.overBudgetCheapest) {
       res.message = `No route has a maximum fare within ৳${c.maxBudget}. Cheapest over-budget option shown separately.`;
+    } else if (directBlocked) {
+      res.message = `Direct road connection between ${HUBS.find((h) => h.hubId === origin)?.name || origin} and ${HUBS.find((h) => h.hubId === destination)?.name || destination} is blocked by Admin Dispatcher (${res.directRoadBlockReason}).`;
+    } else if (hasBlockedRoads) {
+      res.message = 'No valid route is available: direct road connections are blocked by Admin and no alternative path exists under your filters.';
     } else if (c.allowedModes && c.allowedModes.length < 5) {
       const modeLabels = { bus: 'Local Bus', metro: 'MRT-6 Metro', leguna: 'Leguna', rickshaw: 'Rickshaw', walking: 'Walking' };
       const selectedNames = c.allowedModes.map((m) => modeLabels[m] || m).join(', ');
@@ -182,11 +289,17 @@ export function findRoutes(origin, destination, constraints = {}, scenario = {})
     return res;
   }
   res.status = stats.complete ? 'OK' : 'SEARCH_INCOMPLETE';
+  res.isDetourRoute = directBlocked;
   for (const g of ['cheapest', 'fastest', 'balanced']) {
-    const p = best(g, ok); res.routes[g] = { ...p, goal: g };
+    const p = best(g, ok); res.routes[g] = { ...p, goal: g, isDetour: directBlocked, detourReason: res.directRoadBlockReason };
     const crit = [...p.legs].filter((l) => l.mode !== 'walking').sort((a, b) => b.minutes - a.minutes)[0]?.lineId;
     const b = best(g, ok.filter((r) => r.routeId !== p.routeId && !(crit && r.legs.some((l) => l.lineId === crit))));
-    res.backups[g] = b && { ...b, goal: 'backup', trigger: crit ? `${crit} becomes unavailable` : 'Primary route unavailable', diff: { minutes: b.timeMinutes - p.timeMinutes, fare: b.fare.est - p.fare.est, transfers: b.transfers - p.transfers } };
+    res.backups[g] = b && { ...b, goal: 'backup', isDetour: directBlocked, detourReason: res.directRoadBlockReason, trigger: crit ? `${crit} becomes unavailable` : 'Primary route unavailable', diff: { minutes: b.timeMinutes - p.timeMinutes, fare: b.fare.est - p.fare.est, transfers: b.transfers - p.transfers } };
+  }
+  if (directBlocked) {
+    const origName = HUBS.find((h) => h.hubId === origin)?.name || origin;
+    const destName = HUBS.find((h) => h.hubId === destination)?.name || destination;
+    res.explanations.push(`⚠️ Detour active: Direct road ${origName} ↔ ${destName} is blocked (${res.directRoadBlockReason}). Bypassing blocked corridor via alternative hubs.`);
   }
   res.explanations.push('Cheapest = lowest estimated fare; Fastest = lowest time; Balanced = weighted score of time, fare and transfers.');
   if (!stats.complete) res.explanations.push('Search limit reached: results are partial, not proven optimal.');
@@ -237,9 +350,23 @@ export function explainChange(route, scenario) {
 export function edgeStatus(pairKey, scenario) {
   const s = norm(scenario);
   const e = EDGES.find((x) => x.pairKey === pairKey);
-  const services = e.services.map((svc) => ({ lineId: svc.lineId, mode: svc.mode, reason: serviceBlockReason(e, svc, s) }));
+  if (!e) return { services: [], blocked: false, hubBlocked: false, delayed: false, isRoadBlocked: false };
+  const roadBlocked = isEdgeBlocked(e, s);
   const hubBlocked = pairKey.split('|').some((h) => s.blockedHubs.includes(h));
-  return { services, blocked: services.every((x) => x.reason) || hubBlocked, hubBlocked, delayed: s.delays.some((d) => services.some((x) => x.lineId === d.lineId)) };
+  const services = e.services.map((svc) => ({ lineId: svc.lineId, mode: svc.mode, reason: serviceBlockReason(e, svc, s) }));
+  const delayed = Boolean(
+    s.delays?.some((d) => services.some((x) => x.lineId === d.lineId)) ||
+    s.edgeStatuses?.[pairKey]?.status === 'delayed'
+  );
+  const edgeObj = s.edgeStatuses?.[pairKey] || (e.fromHubId && s.edgeStatuses?.[`${e.fromHubId}|${e.toHubId}`]);
+  return {
+    services,
+    blocked: roadBlocked || hubBlocked || services.every((x) => x.reason),
+    hubBlocked,
+    isRoadBlocked: roadBlocked,
+    roadBlockReason: edgeObj?.reasonLabel || edgeObj?.reason,
+    delayed,
+  };
 }
 
 export const hubName = (id) => HUBS.find((h) => h.hubId === id)?.name || id;

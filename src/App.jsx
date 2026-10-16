@@ -1,404 +1,409 @@
-import React, { useMemo, useState } from 'react';
-import MapView, { COLORS } from './components/MapView.jsx';
-import { HUBS, EDGES, LINES } from './data/network.js';
-import { findRoutes, explainChange, hubName, routeModes, DEFAULT_SCENARIO } from './engine/router.js';
-
-const bdt = (f) => (f.min === f.max ? `৳${f.min}` : `৳${f.min}–${f.max}`);
-const sign = (n) => (n > 0 ? `+${n}` : `${n}`);
-const PAIRS = [...new Set(EDGES.map((e) => e.pairKey))];
-const unresolved = HUBS.filter((h) => !Number.isFinite(h.lat) || !Number.isFinite(h.lng));
-
-const AVAILABLE_MODES = [
-  { id: 'bus', label: 'Local Bus', icon: '🚌' },
-  { id: 'metro', label: 'MRT-6 Metro Rail', icon: '🚆' },
-  { id: 'leguna', label: 'Leguna', icon: '🚐' },
-  { id: 'rickshaw', label: 'Rickshaw', icon: '🛺' },
-  { id: 'walking', label: 'Walking', icon: '🚶' },
-];
-
-function Card({ kind, label, r, active, onClick }) {
-  const modes = r ? routeModes(r).join(' + ') : null;
-  return (
-    <button className={`card ${active ? 'on' : ''}`} style={{ borderLeftColor: COLORS[kind] }} onClick={onClick} disabled={!r}>
-      <div className="ct">{label}{r?.budgetStatus === 'ESTIMATED_WITHIN_BUDGET' && ' (est.)'}</div>
-      {r ? (
-        <div className="cm">
-          <b>{bdt(r.fare)}</b>
-          <span>{r.timeMinutes} min · {r.transfers} transfer{r.transfers !== 1 && 's'}</span>
-          {modes && <span className="route-modes-badge">{modes}</span>}
-        </div>
-      ) : (
-        <div className="cm muted">Not available</div>
-      )}
-    </button>
-  );
-}
+import React, { useState, useEffect } from 'react';
+import Navbar from './components/Navbar.jsx';
+import CommuterView from './components/CommuterView.jsx';
+import AdminPortal from './components/AdminPortal.jsx';
+import ChatDock from './components/ChatDock.jsx';
+import {
+  INITIAL_LANDMARKS,
+  INITIAL_ALERTS,
+  INITIAL_MODERATION_QUEUE,
+  INITIAL_FARE_CONFIG,
+  INITIAL_AUDIT_LOG,
+} from './data/initialData.js';
+import { DEFAULT_SCENARIO } from './engine/router.js';
+import {
+  syncScenarioToBackend,
+  fetchScenarioFromBackend,
+  resetScenarioOnBackend,
+} from './engine/apiSync.js';
 
 export default function App() {
-  const [origin, setOrigin] = useState('mirpur');
-  const [dest, setDest] = useState('motijheel');
-  const [goal, setGoal] = useState('fastest'); // 'fastest' | 'cheapest' | 'balanced' | 'all'
-  const [viewBackup, setViewBackup] = useState(false);
-  const [student, setStudent] = useState(false);
-  const [budget, setBudget] = useState('');
-  const [maxTransfers, setMaxTransfers] = useState(3);
-  const [scn, setScn] = useState(DEFAULT_SCENARIO);
-  const [open, setOpen] = useState(true);
-  const [delay, setDelay] = useState({ lineId: 'MRT-6', rate: 30, extra: 3 });
-
-  // Transport mode filters & single-mode routing state
-  const [allowedModes, setAllowedModes] = useState(['bus', 'metro', 'leguna', 'rickshaw', 'walking']);
-  const [singleModeOnly, setSingleModeOnly] = useState(false);
-
-  const cons = useMemo(() => ({
-    student,
-    maxBudget: budget === '' ? undefined : Number(budget),
-    maxTransfers: Number(maxTransfers),
-    allowedModes,
-    singleModeOnly,
-  }), [student, budget, maxTransfers, allowedModes, singleModeOnly]);
-
-  const base = useMemo(() => findRoutes(origin, dest, cons, {}), [origin, dest, cons]);
-  const res = useMemo(() => findRoutes(origin, dest, cons, scn), [origin, dest, cons, scn]);
-  const simulated = JSON.stringify(scn) !== JSON.stringify(DEFAULT_SCENARIO);
-
-  const isAll = goal === 'all';
-  const effectiveGoal = isAll ? 'fastest' : goal;
-  const backup = res.backups[effectiveGoal];
-  const primary = isAll ? null : res.routes[goal];
-  const shown = isAll ? null : (viewBackup && backup ? backup : primary);
-  const kind = isAll ? 'all' : (viewBackup && backup ? 'backup' : goal);
-  const baseRoute = base.routes[effectiveGoal];
-  const changed = simulated && baseRoute && (!primary || primary.routeId !== baseRoute.routeId);
-  const reasons = simulated ? explainChange(baseRoute, scn) : [];
-
-  const allThreeRoutes = useMemo(() => {
-    if (!res || res.status !== 'OK') return [];
-    const list = [];
-    ['cheapest', 'fastest', 'balanced'].forEach((g) => {
-      if (res.routes[g]) list.push({ ...res.routes[g], kind: g });
-    });
-    if (backup) list.push({ ...backup, kind: 'backup' });
-    return list;
-  }, [res, backup]);
-
-  // other routes drawn subdued; same physical route is drawn once (de-duplicated by routeId)
-  const others = useMemo(() => {
-    if (isAll) return [];
-    const m = new Map();
-    ['cheapest', 'fastest', 'balanced'].forEach((g) => {
-      if (res.routes[g] && !m.has(res.routes[g].routeId)) {
-        m.set(res.routes[g].routeId, { ...res.routes[g], kind: g });
-      }
-    });
-    if (backup && !m.has(backup.routeId)) m.set(backup.routeId, { ...backup, kind: 'backup' });
-    if (shown) m.delete(shown.routeId);
-    return [...m.values()];
-  }, [res, backup, shown, isAll]);
-
-  const toggle = (key, v) => setScn((s) => ({ ...s, [key]: s[key].includes(v) ? s[key].filter((x) => x !== v) : [...s[key], v] }));
-  const pickGoal = (g) => { setGoal(g); setViewBackup(false); };
-
-  const toggleMode = (mId) => {
-    setAllowedModes((prev) => {
-      if (prev.includes(mId)) {
-        if (prev.length === 1) return prev; // Do not allow empty selection
-        return prev.filter((x) => x !== mId);
-      }
-      return [...prev, mId];
-    });
+  // Route detection helper: checks if URL is /admin or /maintenance
+  const isAdminPath = () => {
+    if (typeof window === 'undefined') return false;
+    const path = (window.location.pathname || '').toLowerCase();
+    const hash = (window.location.hash || '').toLowerCase();
+    return (
+      path.includes('/admin') ||
+      path.includes('/maintenance') ||
+      hash.includes('/admin') ||
+      hash.includes('/maintenance')
+    );
   };
 
-  const lines = [...new Set(EDGES.flatMap((e) => e.services.map((s) => s.lineId)))].filter((l) => l !== 'WALK');
-  const same = [['cheapest', 'fastest'], ['cheapest', 'balanced'], ['fastest', 'balanced']].filter(([a, b]) => res.routes[a] && res.routes[a].routeId === res.routes[b]?.routeId).map(([a, b]) => `${a} = ${b}`);
+  const [currentPortal, setCurrentPortal] = useState(() => (isAdminPath() ? 'admin' : 'commuter'));
+  const [isAdminLoggedIn, setIsAdminLoggedIn] = useState(() => {
+    try {
+      return sessionStorage.getItem('dp_admin_auth') === 'true';
+    } catch {
+      return false;
+    }
+  });
+  const [theme, setTheme] = useState('dark');
+
+  // Routing Origin / Destination
+  const [origin, setOrigin] = useState('mirpur');
+  const [dest, setDest] = useState('motijheel');
+
+  // Shared System State
+  const [landmarks, setLandmarks] = useState(INITIAL_LANDMARKS);
+  const [alerts, setAlerts] = useState(INITIAL_ALERTS);
+  const [moderationQueue, setModerationQueue] = useState(INITIAL_MODERATION_QUEUE);
+  const [fareConfig, setFareConfig] = useState(INITIAL_FARE_CONFIG);
+  const [scenario, setScenario] = useState(() => {
+    // Load persisted admin blocks/delays from localStorage so all tabs share state
+    try {
+      const saved = localStorage.getItem('dp_scenario');
+      if (saved) return { ...DEFAULT_SCENARIO, ...JSON.parse(saved) };
+    } catch {}
+    return DEFAULT_SCENARIO;
+  });
+  const [auditLog, setAuditLog] = useState(INITIAL_AUDIT_LOG);
+
+  // Rush hour is strictly broadcasted by Admin (not fixed clock timer)
+  const rushHour = Boolean(scenario.rushHour);
+
+  // URL-based route listener: switches portal when navigating to /admin, /maintenance, or /
+  useEffect(() => {
+    const handleLocationChange = () => {
+      setCurrentPortal(isAdminPath() ? 'admin' : 'commuter');
+    };
+    // Cross-tab sync: when admin blocks a road in another tab, pick it up immediately
+    const handleStorage = (e) => {
+      if (e.key === 'dp_scenario' && e.newValue) {
+        try {
+          setScenario({ ...DEFAULT_SCENARIO, ...JSON.parse(e.newValue) });
+        } catch {}
+      }
+    };
+
+    // Initial backend fetch: sync active backend scenario on mount
+    fetchScenarioFromBackend(DEFAULT_SCENARIO).then((backendSc) => {
+      if (backendSc) {
+        setScenario((prev) => ({ ...prev, ...backendSc }));
+        try { localStorage.setItem('dp_scenario', JSON.stringify(backendSc)); } catch {}
+      }
+    });
+
+    const handleFocus = () => {
+      fetchScenarioFromBackend(DEFAULT_SCENARIO).then((backendSc) => {
+        if (backendSc) {
+          setScenario((prev) => ({ ...prev, ...backendSc }));
+          try { localStorage.setItem('dp_scenario', JSON.stringify(backendSc)); } catch {}
+        }
+      });
+    };
+
+    window.addEventListener('popstate', handleLocationChange);
+    window.addEventListener('hashchange', handleLocationChange);
+    window.addEventListener('storage', handleStorage);
+    window.addEventListener('focus', handleFocus);
+    return () => {
+      window.removeEventListener('popstate', handleLocationChange);
+      window.removeEventListener('hashchange', handleLocationChange);
+      window.removeEventListener('storage', handleStorage);
+      window.removeEventListener('focus', handleFocus);
+    };
+  }, []);
+
+  const handleNavigate = (path) => {
+    try {
+      window.history.pushState({}, '', path);
+    } catch {
+      window.location.hash = path;
+    }
+    setCurrentPortal(isAdminPath() ? 'admin' : 'commuter');
+  };
+
+  // Sync dark/light theme to document root
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+  }, [theme]);
+
+  // Live auto-updating Dhaka time (pure real-time clock)
+  const [liveTime, setLiveTime] = useState(() => {
+    try {
+      return new Date().toLocaleTimeString('en-GB', {
+        timeZone: 'Asia/Dhaka',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+    } catch {
+      const d = new Date();
+      return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    }
+  });
+
+  const simTimeString = liveTime;
+
+  useEffect(() => {
+    const updateTime = () => {
+      try {
+        const timeStr = new Date().toLocaleTimeString('en-GB', {
+          timeZone: 'Asia/Dhaka',
+          hour: '2-digit',
+          minute: '2-digit',
+        });
+        setLiveTime(timeStr);
+      } catch {
+        // fallback
+      }
+    };
+
+    updateTime();
+    const interval = setInterval(updateTime, 10000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const handleToggleTheme = () => {
+    setTheme((t) => (t === 'dark' ? 'light' : 'dark'));
+  };
+
+  // Add crowdsourced alert from commuter
+  const handleAddAlert = (newAlert) => {
+    setAlerts((prev) => [newAlert, ...prev]);
+
+    // Also push to moderation queue
+    setModerationQueue((prev) => [
+      {
+        id: `mod-${Date.now()}`,
+        hubId: newAlert.hubId,
+        type: newAlert.type,
+        text: newAlert.rawText || newAlert.text,
+        submitter: 'Commuter (Ingested)',
+        confidence: newAlert.confidence,
+        submittedAt: 'Just now',
+        status: 'pending',
+      },
+      ...prev,
+    ]);
+
+    setAuditLog((prev) => [
+      {
+        id: `aud-${Date.now()}`,
+        time: simTimeString,
+        actor: 'Crowdsource Ingestor',
+        action: `Citizen report ingested at ${newAlert.hubId}: "${newAlert.title}"`,
+      },
+      ...prev,
+    ]);
+  };
+
+  // Confirm / upvote an alert (+0.20 confidence)
+  const handleConfirmAlert = (alertId) => {
+    setAlerts((prev) =>
+      prev.map((a) => {
+        if (a.id === alertId) {
+          const newConf = Math.min(1.0, a.confidence + 0.2);
+          const isNowHard = newConf >= 0.6;
+          // If waterlogging or blockade becomes hard, auto-block the hub in scenario!
+          if (isNowHard && ['waterlogging', 'blockade'].includes(a.type)) {
+            setScenario((sc) => ({
+              ...sc,
+              blockedHubs: [...new Set([...sc.blockedHubs, a.hubId])],
+            }));
+          }
+          return {
+            ...a,
+            confidence: newConf,
+            confirmations: a.confirmations + 1,
+            upvotedByMe: true,
+            status: isNowHard ? 'active' : a.status,
+          };
+        }
+        return a;
+      })
+    );
+  };
+
+  // Admin approves report from moderation queue
+  const handleApproveReport = (item) => {
+    setModerationQueue((prev) => prev.filter((q) => q.id !== item.id));
+
+    // Verify & activate in live alerts
+    const verifiedAlert = {
+      id: `alt-v-${Date.now()}`,
+      hubId: item.hubId,
+      type: item.type,
+      title: `Verified Incident: ${item.type.toUpperCase()} at ${item.hubId}`,
+      text: item.text,
+      rawText: item.text,
+      confidence: 0.9,
+      status: 'active',
+      severity: 'high',
+      source: 'admin',
+      confirmations: 8,
+      upvotedByMe: true,
+      reportedAt: 'Just now',
+      timestamp: Date.now(),
+      impact: 'Official alert confirmed by transit authority dispatcher.',
+    };
+
+    setAlerts((prev) => [verifiedAlert, ...prev]);
+
+    // If blockade or waterlogging, add to blockedHubs in scenario
+    if (['blockade', 'waterlogging'].includes(item.type)) {
+      setScenario((prev) => ({
+        ...prev,
+        blockedHubs: [...new Set([...prev.blockedHubs, item.hubId])],
+      }));
+    }
+
+    setAuditLog((prev) => [
+      {
+        id: `aud-${Date.now()}`,
+        time: simTimeString,
+        actor: 'Admin Dispatcher',
+        action: `Approved & published alert for ${item.hubId} (Confidence: 0.90)`,
+      },
+      ...prev,
+    ]);
+  };
+
+  // Admin rejects report
+  const handleRejectReport = (itemId) => {
+    setModerationQueue((prev) => prev.filter((q) => q.id !== itemId));
+    setAuditLog((prev) => [
+      {
+        id: `aud-${Date.now()}`,
+        time: simTimeString,
+        actor: 'Admin Dispatcher',
+        action: `Rejected false report from moderation queue`,
+      },
+      ...prev,
+    ]);
+  };
+
+  // Admin saves landmark guidance note
+  const handleSaveLandmark = (hubId, en, bn) => {
+    setLandmarks((prev) => ({
+      ...prev,
+      [hubId]: { en, bn },
+    }));
+
+    setAuditLog((prev) => [
+      {
+        id: `aud-${Date.now()}`,
+        time: simTimeString,
+        actor: 'Admin Dispatcher',
+        action: `Updated landmark guidance notes for ${hubId}`,
+      },
+      ...prev,
+    ]);
+  };
+
+  // Admin updates fare configuration
+  const handleUpdateFareConfig = (newFares) => {
+    setFareConfig(newFares);
+    setAuditLog((prev) => [
+      {
+        id: `aud-${Date.now()}`,
+        time: simTimeString,
+        actor: 'Admin Dispatcher',
+        action: `Updated regulatory fare chart (Fuel surcharge: ${newFares.fuelAdjustmentPct}%)`,
+      },
+      ...prev,
+    ]);
+  };
+
+  // Admin updates disruption scenario — persisted to localStorage so all tabs see changes instantly, and pushed to backend API
+  const handleUpdateScenario = (newScenario) => {
+    setScenario(newScenario);
+    try { localStorage.setItem('dp_scenario', JSON.stringify(newScenario)); } catch {}
+    syncScenarioToBackend(newScenario);
+    setAuditLog((prev) => [
+      {
+        id: `aud-${Date.now()}`,
+        time: simTimeString,
+        actor: 'Admin Dispatcher',
+        action: `Updated live disruption scenario (${(newScenario.blockedHubs || []).length} blocked hubs, ${(newScenario.blockedEdges || []).length} blocked roads)`,
+      },
+      ...prev,
+    ]);
+  };
+
+  // Reset to factory seed data
+  const handleResetData = () => {
+    if (window.confirm('Reset all alerts, fares and landmarks to factory default seed data?')) {
+      setLandmarks(INITIAL_LANDMARKS);
+      setAlerts(INITIAL_ALERTS);
+      setModerationQueue(INITIAL_MODERATION_QUEUE);
+      setFareConfig(INITIAL_FARE_CONFIG);
+      setScenario(DEFAULT_SCENARIO);
+      try { localStorage.removeItem('dp_scenario'); } catch {}
+      resetScenarioOnBackend();
+      setAuditLog((prev) => [
+        {
+          id: `aud-${Date.now()}`,
+          time: simTimeString,
+          actor: 'Admin Dispatcher',
+          action: 'Reset all system collections to baseline seed data',
+        },
+        ...prev,
+      ]);
+    }
+  };
 
   return (
-    <div className="app">
-      <header>
-        <h1>🚌 KoyJabo <small>Dhaka transit navigator · prototype data</small></h1>
-        <button className="tog" onClick={() => setOpen(!open)}>{open ? 'Hide panel' : 'Show panel'}</button>
-      </header>
-      <div className={`main ${open ? '' : 'closed'}`}>
-        <div className="mapwrap">
-          <MapView
-            hubs={HUBS}
-            edges={EDGES}
-            scenario={scn}
+    <div className="app-container">
+      {/* GLOBAL NAVBAR */}
+      <Navbar
+        simTime={simTimeString}
+        rushHour={rushHour}
+        theme={theme}
+        onToggleTheme={handleToggleTheme}
+        currentPortal={currentPortal}
+        onNavigate={handleNavigate}
+      />
+
+      {/* PORTAL VIEW AREA */}
+      <main className="portal-main-area">
+        {currentPortal === 'commuter' ? (
+          <CommuterView
             origin={origin}
-            destination={dest}
-            displayed={shown}
-            displayedKind={kind}
-            others={others}
-            allThreeRoutes={allThreeRoutes}
-            panelOpen={open}
+            dest={dest}
             onSetOrigin={setOrigin}
             onSetDest={setDest}
+            scenario={scenario}
+            landmarks={landmarks}
+            alerts={alerts}
+            onAddAlert={handleAddAlert}
+            onConfirmAlert={handleConfirmAlert}
+            fareConfig={fareConfig}
+            rushHour={rushHour}
+            onUpdateScenario={handleUpdateScenario}
           />
-          <div className="legend">
-            <div className="legend-title">Routes &amp; Lines</div>
-            {Object.entries(COLORS).map(([k, c]) => (
-              <div key={k}><i style={{ background: c }} />{k}</div>
-            ))}
-            <div><i style={{ background: '#64748b' }} />transit network link</div>
-            <div><i style={{ background: '#dc2626' }} />blocked link (sim.)</div>
-            <div className="legend-hubs">
-              <div><span className="legend-pin origin">A</span> Start hub</div>
-              <div><span className="legend-pin dest">B</span> Destination</div>
-              <div><span className="legend-marker route" /> Route stop</div>
-              <div><span className="legend-marker hub" /> Transit hub (14)</div>
-            </div>
-          </div>
-        </div>
-        <aside>
-          <section>
-            <div className="row">
-              <label>From
-                <select value={origin} onChange={(e) => setOrigin(e.target.value)}>
-                  {HUBS.map((h) => <option key={h.hubId} value={h.hubId}>{h.name}</option>)}
-                </select>
-              </label>
-              <button className="swap" onClick={() => { setOrigin(dest); setDest(origin); }}>⇄</button>
-              <label>To
-                <select value={dest} onChange={(e) => setDest(e.target.value)}>
-                  {HUBS.map((h) => <option key={h.hubId} value={h.hubId}>{h.name}</option>)}
-                </select>
-              </label>
-            </div>
+        ) : (
+          <AdminPortal
+            isLoggedIn={isAdminLoggedIn}
+            onLogin={() => {
+              setIsAdminLoggedIn(true);
+              try { sessionStorage.setItem('dp_admin_auth', 'true'); } catch {}
+            }}
+            onLogout={() => {
+              setIsAdminLoggedIn(false);
+              try { sessionStorage.removeItem('dp_admin_auth'); } catch {}
+            }}
+            onResetData={handleResetData}
+            landmarks={landmarks}
+            onSaveLandmark={handleSaveLandmark}
+            fareConfig={fareConfig}
+            onUpdateFareConfig={handleUpdateFareConfig}
+            scenario={scenario}
+            onUpdateScenario={handleUpdateScenario}
+            auditLog={auditLog}
+          />
+        )}
+      </main>
 
-            {/* Transport Mode Filters & Single-Mode Option */}
-            <div className="mode-filter-section">
-              <div className="section-label-row">
-                <span className="section-title">Transport Modes</span>
-                <div className="mode-quick-actions">
-                  <button type="button" className="btn-link" onClick={() => { setAllowedModes(['bus', 'metro', 'leguna', 'rickshaw', 'walking']); setSingleModeOnly(false); }}>All</button>
-                  <button type="button" className="btn-link" onClick={() => { setAllowedModes(['bus']); setSingleModeOnly(true); }}>Bus</button>
-                  <button type="button" className="btn-link" onClick={() => { setAllowedModes(['metro']); setSingleModeOnly(true); }}>Metro</button>
-                  <button type="button" className="btn-link" onClick={() => { setAllowedModes(['rickshaw']); setSingleModeOnly(true); }}>Rickshaw</button>
-                  <button type="button" className="btn-link" onClick={() => { setAllowedModes(['leguna']); setSingleModeOnly(true); }}>Leguna</button>
-                </div>
-              </div>
-              <div className="mode-chips">
-                {AVAILABLE_MODES.map((m) => (
-                  <label key={m.id} className="mode-chip-label">
-                    <input
-                      type="checkbox"
-                      checked={allowedModes.includes(m.id)}
-                      onChange={() => toggleMode(m.id)}
-                    />
-                    <span>{m.icon} {m.label}</span>
-                  </label>
-                ))}
-              </div>
-              <label className="chk single-mode-chk">
-                <input
-                  type="checkbox"
-                  checked={singleModeOnly}
-                  onChange={(e) => setSingleModeOnly(e.target.checked)}
-                />
-                <span>Single-mode-only routing (no transfers between modes)</span>
-              </label>
-            </div>
-
-            {/* Route Preferences: Cheapest, Fastest, Balanced, and All Three */}
-            <div className="pref-selector">
-              <span className="section-title">Route Preference</span>
-              <div className="pref-btn-group">
-                <button
-                  type="button"
-                  className={`pref-btn ${goal === 'fastest' && !viewBackup ? 'active fastest' : ''}`}
-                  onClick={() => pickGoal('fastest')}
-                >
-                  ⚡ Fastest
-                </button>
-                <button
-                  type="button"
-                  className={`pref-btn ${goal === 'cheapest' && !viewBackup ? 'active cheapest' : ''}`}
-                  onClick={() => pickGoal('cheapest')}
-                >
-                  💵 Cheapest
-                </button>
-                <button
-                  type="button"
-                  className={`pref-btn ${goal === 'balanced' && !viewBackup ? 'active balanced' : ''}`}
-                  onClick={() => pickGoal('balanced')}
-                >
-                  ⚖️ Balanced
-                </button>
-                <button
-                  type="button"
-                  className={`pref-btn ${goal === 'all' && !viewBackup ? 'active all' : ''}`}
-                  onClick={() => pickGoal('all')}
-                >
-                  ✨ All Three
-                </button>
-              </div>
-            </div>
-
-            <div className="row">
-              <label>Budget ৳
-                <input type="number" min="0" value={budget} placeholder="none" onChange={(e) => setBudget(e.target.value)} />
-              </label>
-              <label>Max transfers
-                <select value={maxTransfers} onChange={(e) => setMaxTransfers(e.target.value)}>
-                  {[0, 1, 2, 3].map((n) => <option key={n}>{n}</option>)}
-                </select>
-              </label>
-              <label className="chk">
-                <input type="checkbox" checked={student} onChange={(e) => setStudent(e.target.checked)} />
-                Student
-              </label>
-            </div>
-            {unresolved.length > 0 && <p className="warn">Hubs missing coordinates: {unresolved.map((h) => h.name).join(', ')}</p>}
-          </section>
-
-          {simulated && <div className="sim">⚠ SIMULATED conditions – not live incidents</div>}
-          {res.status !== 'OK' && (
-            <div className="msg warn-msg">
-              <strong>Route Search:</strong> {res.message || res.status}
-              <div className="muted" style={{ marginTop: '4px' }}>Status code: {res.status}</div>
-            </div>
-          )}
-          {res.overBudgetCheapest && (
-            <div className="msg">
-              Over budget: {bdt(res.overBudgetCheapest.fare)}, {res.overBudgetCheapest.timeMinutes} min via {res.overBudgetCheapest.hubIds.map(hubName).join(' → ')}
-            </div>
-          )}
-
-          {res.status === 'OK' && (
-            <section>
-              <div className="cards">
-                <Card kind="cheapest" label="Cheapest" r={res.routes.cheapest} active={goal === 'cheapest' && !viewBackup} onClick={() => pickGoal('cheapest')} />
-                <Card kind="fastest" label="Fastest" r={res.routes.fastest} active={goal === 'fastest' && !viewBackup} onClick={() => pickGoal('fastest')} />
-                <Card kind="balanced" label="Balanced" r={res.routes.balanced} active={goal === 'balanced' && !viewBackup} onClick={() => pickGoal('balanced')} />
-                <Card kind="backup" label={`Backup (${effectiveGoal})`} r={backup} active={viewBackup} onClick={() => setViewBackup(true)} />
-              </div>
-              {same.length > 0 && <p className="muted">Same physical route: {same.join(', ')} (drawn once).</p>}
-              {!backup && <p className="muted">No operationally distinct backup found.</p>}
-
-              {/* All Three Routes Comparison Overview */}
-              {isAll && (
-                <div className="detail all-routes-overview">
-                  <h3 style={{ color: '#0f172a' }}>✨ All Three Route Options Overview</h3>
-                  {['cheapest', 'fastest', 'balanced'].map((g) => {
-                    const r = res.routes[g];
-                    if (!r) return null;
-                    return (
-                      <div key={g} className="all-route-box" style={{ borderLeftColor: COLORS[g] }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <strong style={{ color: COLORS[g], textTransform: 'capitalize' }}>{g} Route</strong>
-                          <span style={{ fontWeight: 800 }}>{bdt(r.fare)}</span>
-                        </div>
-                        <div className="muted" style={{ marginTop: '2px' }}>
-                          {r.timeMinutes} min · {r.transfers} transfer(s) · Modes: <b>{routeModes(r).join(' + ')}</b>
-                        </div>
-                        <div style={{ fontSize: '11px', color: '#475569', marginTop: '4px' }}>
-                          Via: {r.hubIds.map(hubName).join(' → ')}
-                        </div>
-                      </div>
-                    );
-                  })}
-                  <p className="muted tiny" style={{ marginTop: '6px' }}>
-                    All routes are drawn on the map with their respective colors ({COLORS.cheapest} cheapest, {COLORS.fastest} fastest, {COLORS.balanced} balanced).
-                  </p>
-                </div>
-              )}
-
-              {/* Single Route Detail */}
-              {!isAll && shown && (
-                <div className="detail">
-                  <h3 style={{ color: COLORS[kind] }}>
-                    {kind === 'backup' ? 'Backup route' : `${goal[0].toUpperCase() + goal.slice(1)} route`}
-                  </h3>
-                  <p>
-                    <b>{bdt(shown.fare)}</b> · {shown.timeMinutes} min · {shown.transfers} transfer(s) · <span className="muted">{shown.fareConfidence.replace('_', ' ').toLowerCase()}{shown.budgetStatus === 'WITHIN_BUDGET' ? ' · within budget (max fare)' : ''}</span>
-                  </p>
-                  <p style={{ marginTop: '2px', fontSize: '12px' }}>
-                    <b>Transport Modes:</b> {routeModes(shown).join(' + ')}
-                  </p>
-                  {kind === 'backup' && (
-                    <p className="muted">
-                      Trigger: {backup.trigger}. vs primary: {sign(backup.diff.minutes)} min, {sign(backup.diff.fare)} ৳, {sign(backup.diff.transfers)} transfers.
-                    </p>
-                  )}
-                  <ol>
-                    {shown.legs.map((l, i) => (
-                      <li key={i}>
-                        <b>{l.mode === 'walking' ? 'Walk' : `Take ${LINES[l.lineId] || l.lineId}`}</b> ({l.mode}) {hubName(l.fromHubId)} → {hubName(l.toHubId)}
-                        <div className="muted">
-                          {l.hubIds.length > 2 && `via ${l.hubIds.slice(1, -1).map(hubName).join(', ')} · `}{l.km.toFixed(1)} km · {l.minutes} min · {bdt(l.fare)}
-                        </div>
-                        <div className="muted">Board at: {HUBS.find((h) => h.hubId === l.fromHubId)?.landmark}</div>
-                      </li>
-                    ))}
-                  </ol>
-                  {shown.transferMinutes > 0 && <p className="muted">Includes {shown.transferMinutes} min transfer wait/walk.</p>}
-                </div>
-              )}
-
-              {res.stats && <p className="muted tiny">Search: {res.stats.hubPaths} hub paths, {res.stats.serviceCandidates} service combos, complete={String(res.stats.complete)}</p>}
-            </section>
-          )}
-
-          {simulated && baseRoute && (
-            <div className="msg">
-              <b>Before vs after ({effectiveGoal})</b>
-              <div>Original: {bdt(baseRoute.fare)}, {baseRoute.timeMinutes} min — {baseRoute.hubIds.map(hubName).join(' → ')}</div>
-              <div>Now: {primary ? `${bdt(primary.fare)}, ${primary.timeMinutes} min — ${primary.hubIds.map(hubName).join(' → ')}` : 'no valid route'}</div>
-              <div>{changed ? (primary ? 'Route changed.' : 'Original route is no longer valid.') : 'Original route still valid.'}</div>
-              {reasons.map((r) => <div key={r} className="muted">• {r}</div>)}
-            </div>
-          )}
-
-          <section className="scn">
-            <h3>What-if simulator</h3>
-            <label className="chk"><input type="checkbox" checked={scn.rushHour} onChange={(e) => setScn({ ...scn, rushHour: e.target.checked })} />Rush hour</label>
-            <label>Rain
-              <select value={scn.rainSeverity} onChange={(e) => setScn({ ...scn, rainSeverity: Number(e.target.value) })}>
-                <option value={0}>None</option>
-                <option value={1}>Light</option>
-                <option value={2}>Heavy (buses suspended)</option>
-              </select>
-            </label>
-            <label>Block hub
-              <select value="" onChange={(e) => e.target.value && toggle('blockedHubs', e.target.value)}>
-                <option value="">Add…</option>
-                {HUBS.map((h) => <option key={h.hubId} value={h.hubId}>{h.name}</option>)}
-              </select>
-            </label>
-            <label>Block connection
-              <select value="" onChange={(e) => e.target.value && toggle('disabledEdges', e.target.value)}>
-                <option value="">Add…</option>
-                {PAIRS.map((p) => <option key={p} value={p}>{p.replace('|', ' ↔ ')}</option>)}
-              </select>
-            </label>
-            <label>Disable line
-              <select value="" onChange={(e) => e.target.value && toggle('disabledLines', e.target.value)}>
-                <option value="">Add…</option>
-                {lines.map((l) => <option key={l}>{l}</option>)}
-              </select>
-            </label>
-            <div className="row">
-              <select value={delay.lineId} onChange={(e) => setDelay({ ...delay, lineId: e.target.value })}>
-                {lines.map((l) => <option key={l}>{l}</option>)}
-              </select>
-              <input type="number" value={delay.rate} onChange={(e) => setDelay({ ...delay, rate: Number(e.target.value) })} title="% delay" />%
-              <input type="number" value={delay.extra} onChange={(e) => setDelay({ ...delay, extra: Number(e.target.value) })} title="extra min" />min
-              <button onClick={() => setScn({ ...scn, delays: [...scn.delays.filter((d) => d.lineId !== delay.lineId), { lineId: delay.lineId, rate: delay.rate / 100, extra: delay.extra }] })}>Add delay</button>
-            </div>
-            <div className="chips">
-              {[...scn.blockedHubs.map((v) => ['blockedHubs', v, `hub ${v}`]), ...scn.disabledEdges.map((v) => ['disabledEdges', v, v.replace('|', '↔')]), ...scn.disabledLines.map((v) => ['disabledLines', v, `line ${v}`])].map(([k, v, t]) => (
-                <button key={k + v} className="chip" onClick={() => toggle(k, v)}>{t} ✕</button>
-              ))}
-              {scn.delays.map((d) => (
-                <button key={d.lineId} className="chip" onClick={() => setScn({ ...scn, delays: scn.delays.filter((x) => x !== d) })}>
-                  {d.lineId} +{Math.round(d.rate * 100)}%/{d.extra}m ✕
-                </button>
-              ))}
-            </div>
-            <button onClick={() => setScn(DEFAULT_SCENARIO)} disabled={!simulated}>Reset scenario</button>
-          </section>
-        </aside>
-      </div>
+      {/* PERSISTENT AI CHAT ASSISTANT DOCK */}
+      <ChatDock
+        onSelectRoute={(o, d) => {
+          setOrigin(o);
+          setDest(d);
+          setCurrentPortal('commuter');
+        }}
+      />
     </div>
   );
 }
