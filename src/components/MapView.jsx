@@ -1,23 +1,32 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { MapContainer, TileLayer, Polyline, Marker, Tooltip, Popup, useMap } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Polyline, Tooltip, Popup, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import { edgeStatus } from '../engine/router.js';
 
 export const COLORS = { cheapest: '#2563eb', fastest: '#16a34a', balanced: '#7c3aed', backup: '#f97316' };
 
-// Fine-tuned label directions so neighbouring hubs never overlap each other
 const HUB_DIRECTIONS = {
-  'agargaon': 'left',
-  'science-lab': 'left',
-  'dhanmondi': 'left',
+  uttara: 'top',
+  mirpur: 'left',
+  mohammadpur: 'left',
+  dhanmondi: 'left',
+  'science-lab': 'bottom',
+  shahbagh: 'right',
+  motijheel: 'right',
+  jatrabari: 'bottom',
+  banasree: 'right',
+  badda: 'right',
+  malibagh: 'right',
+  mohakhali: 'top',
+  agargaon: 'top',
+  farmgate: 'top',
 };
 
-// Create custom high-contrast HTML markers for all 14 Dhaka transit hubs
-const createHubIcon = (hub, isOrigin, isDest, isOnRoute, isBlocked, routeColor) => {
+const createHubIcon = (hub, isOrigin, isDest, isOnRoute, isBlocked, routeColor = '#16a34a') => {
   if (isOrigin) {
     return L.divIcon({
       className: 'hub-icon-container',
-      html: `<div class="hub-pin origin-pin" title="Origin (A): ${hub.name}"><span class="pin-letter">A</span></div>`,
+      html: `<div class="hub-marker origin-marker" title="Origin: ${hub.name}"><span class="marker-symbol">A</span></div>`,
       iconSize: [34, 34],
       iconAnchor: [17, 17],
     });
@@ -25,7 +34,7 @@ const createHubIcon = (hub, isOrigin, isDest, isOnRoute, isBlocked, routeColor) 
   if (isDest) {
     return L.divIcon({
       className: 'hub-icon-container',
-      html: `<div class="hub-pin dest-pin" title="Destination (B): ${hub.name}"><span class="pin-letter">B</span></div>`,
+      html: `<div class="hub-marker dest-marker" title="Destination: ${hub.name}"><span class="marker-symbol">B</span></div>`,
       iconSize: [34, 34],
       iconAnchor: [17, 17],
     });
@@ -66,7 +75,7 @@ function FitAndResize({ bounds, fitKey, panelOpen, viewAll }) {
   }, [map]);
   useEffect(() => {
     map.invalidateSize();
-    if (bounds.length) {
+    if (bounds && bounds.length) {
       map.fitBounds(bounds, { padding: [50, 50], maxZoom: 14 });
     }
   }, [fitKey, panelOpen, viewAll]);
@@ -81,7 +90,8 @@ export default function MapView({
   destination,
   displayed,
   displayedKind,
-  others,
+  others = [],
+  allThreeRoutes = [],
   panelOpen,
   onSetOrigin,
   onSetDest,
@@ -90,10 +100,32 @@ export default function MapView({
   const good = useMemo(() => hubs.filter(valid), [hubs]);
   const pos = useMemo(() => new Map(good.map((h) => [h.hubId, [h.lat, h.lng]])), [good]);
   const pairs = useMemo(() => [...new Set(edges.map((e) => e.pairKey))], [edges]);
-  const line = (r) => r.hubIds.map((h) => pos.get(h)).filter(Boolean);
-  const routeHubs = new Set(displayed?.hubIds || []);
-  const bounds = (displayed && !viewAll) ? line(displayed) : good.map((h) => [h.lat, h.lng]);
-  const fitKey = (displayed && !viewAll) ? displayed.routeId : 'all';
+  const line = (r) => (r?.hubIds ? r.hubIds.map((h) => pos.get(h)).filter(Boolean) : []);
+
+  const isAll = displayedKind === 'all';
+  const routeHubs = useMemo(() => {
+    if (isAll && allThreeRoutes.length > 0) {
+      return new Set(allThreeRoutes.flatMap((r) => r.hubIds || []));
+    }
+    return new Set(displayed?.hubIds || []);
+  }, [isAll, allThreeRoutes, displayed]);
+
+  const bounds = useMemo(() => {
+    if (viewAll) return good.map((h) => [h.lat, h.lng]);
+    if (isAll && allThreeRoutes.length > 0) {
+      const allCoords = allThreeRoutes.flatMap((r) => line(r));
+      return allCoords.length > 0 ? allCoords : good.map((h) => [h.lat, h.lng]);
+    }
+    if (displayed) return line(displayed);
+    return good.map((h) => [h.lat, h.lng]);
+  }, [viewAll, isAll, allThreeRoutes, displayed, good]);
+
+  const fitKey = useMemo(() => {
+    if (viewAll) return 'all';
+    if (isAll && allThreeRoutes.length > 0) return `all-${allThreeRoutes.map((r) => r.routeId).join(',')}`;
+    return displayed ? displayed.routeId : 'all';
+  }, [viewAll, isAll, allThreeRoutes, displayed]);
+
   const col = COLORS[displayedKind] || '#111';
 
   return (
@@ -142,32 +174,81 @@ export default function MapView({
           );
         })}
 
-        {/* Alternative / Inactive Routes */}
-        {others.map((r) => (
-          <Polyline
-            key={r.routeId}
-            positions={line(r)}
-            pathOptions={{
-              color: COLORS[r.kind],
-              weight: 5,
-              opacity: 0.35,
-              dashArray: r.kind === 'backup' ? '8 8' : undefined,
-            }}
-          />
-        ))}
+        {/* Case 1: Route preference is "All Three" -> Render all routes prominently with distinct colors */}
+        {isAll ? (
+          allThreeRoutes.map((r, i) => {
+            const rColor = COLORS[r.kind] || '#0f172a';
+            const weight = r.kind === 'cheapest' ? 9 : (r.kind === 'fastest' ? 6 : 3.5);
+            return (
+              <Polyline
+                key={`${r.routeId}-${r.kind}-${i}`}
+                positions={line(r)}
+                pathOptions={{
+                  color: rColor,
+                  weight,
+                  opacity: 0.9,
+                  dashArray: r.kind === 'backup' ? '10 8' : undefined,
+                }}
+              >
+                <Tooltip sticky className="edge-tooltip">
+                  <div style={{ fontWeight: 800, color: rColor, textTransform: 'uppercase' }}>
+                    {r.kind} ROUTE
+                  </div>
+                  <div>
+                    <b>৳{r.fare.min === r.fare.max ? r.fare.min : `${r.fare.min}–${r.fare.max}`}</b> · {r.timeMinutes} min · {r.transfers} transfer(s)
+                  </div>
+                  <div style={{ fontSize: '11px', color: '#475569', marginTop: '2px' }}>
+                    Modes: {[...new Set(r.legs.map((l) => l.mode))].join(' + ')}
+                  </div>
+                </Tooltip>
+              </Polyline>
+            );
+          })
+        ) : (
+          /* Case 2: Specific preference selected -> Prominently highlight active route, show others subdued */
+          <>
+            {others.map((r) => (
+              <Polyline
+                key={r.routeId}
+                positions={line(r)}
+                pathOptions={{
+                  color: COLORS[r.kind],
+                  weight: 5,
+                  opacity: 0.35,
+                  dashArray: r.kind === 'backup' ? '8 8' : undefined,
+                }}
+              >
+                <Tooltip sticky className="edge-tooltip">
+                  <div style={{ fontWeight: 700, color: COLORS[r.kind], textTransform: 'uppercase' }}>
+                    {r.kind} route (alternative)
+                  </div>
+                  <div>৳{r.fare.min === r.fare.max ? r.fare.min : `${r.fare.min}–${r.fare.max}`} · {r.timeMinutes} min · {r.transfers} transfer(s)</div>
+                  <div style={{ fontSize: '11px', color: '#475569' }}>Modes: {[...new Set(r.legs.map((l) => l.mode))].join(' + ')}</div>
+                </Tooltip>
+              </Polyline>
+            ))}
 
-        {/* Active Selected Route */}
-        {displayed && (
-          <Polyline
-            key={displayed.routeId}
-            positions={line(displayed)}
-            pathOptions={{
-              color: col,
-              weight: 8,
-              opacity: 0.95,
-              dashArray: displayedKind === 'backup' ? '12 10' : undefined,
-            }}
-          />
+            {displayed && (
+              <Polyline
+                key={displayed.routeId}
+                positions={line(displayed)}
+                pathOptions={{
+                  color: col,
+                  weight: 8,
+                  opacity: 0.95,
+                  dashArray: displayedKind === 'backup' ? '12 10' : undefined,
+                }}
+              >
+                <Tooltip sticky className="edge-tooltip">
+                  <div style={{ fontWeight: 800, color: col, textTransform: 'uppercase' }}>
+                    {displayedKind} route
+                  </div>
+                  <div><b>৳{displayed.fare.min === displayed.fare.max ? displayed.fare.min : `${displayed.fare.min}–${displayed.fare.max}`}</b> · {displayed.timeMinutes} min · {displayed.transfers} transfer(s)</div>
+                  <div style={{ fontSize: '11px', color: '#475569', marginTop: '2px' }}>Modes: {[...new Set(displayed.legs.map((l) => l.mode))].join(' + ')}</div>
+                </Tooltip>
+              </Polyline>
+            )}
+          </>
         )}
 
         {/* 14 High-Visibility Dhaka Transit Hubs */}

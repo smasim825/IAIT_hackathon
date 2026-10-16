@@ -23,6 +23,13 @@ export function serviceBlockReason(e, svc, s, c = {}) {
   if (!svc.isEnabled) return `${svc.lineId} is disabled`;
   if (s.disabledLines.includes(svc.lineId)) return `${svc.lineId} is disabled (scenario)`;
   if (s.disabledEdges.includes(e.pairKey)) return 'connection is blocked (scenario)';
+
+  // User-selectable transport mode filters (Local Bus, MRT-6 Metro, Leguna, Rickshaw, Walking)
+  if (c.allowedModes && c.allowedModes.length > 0) {
+    const isAllowed = c.allowedModes.includes(svc.mode) || (svc.mode === 'cng' && c.allowedModes.includes('rickshaw'));
+    if (!isAllowed) return `mode ${svc.mode} is not selected`;
+  }
+
   if (c.avoidModes?.includes(svc.mode)) return `mode ${svc.mode} avoided`;
   if (s.rainSeverity >= 2 && rainAffects(e, s) && ['bus', 'leguna'].includes(svc.mode)) return 'heavy rain suspends buses';
   return null;
@@ -99,6 +106,13 @@ function search(origin, dest, c, s) {
         if (out.length >= CONFIG.maxCandidates) { stats.complete = false; return; }
         stats.serviceCandidates++;
         const j = buildJourney(path, pick.slice(), s, c.student);
+
+        // Single-mode-only constraint enforcement
+        if (c.singleModeOnly) {
+          const distinctModes = new Set(j.legs.map((l) => (l.mode === 'cng' ? 'rickshaw' : l.mode)));
+          if (distinctModes.size > 1) return rej('multiple modes in single-mode routing');
+        }
+
         if (j.transfers > (c.maxTransfers ?? Infinity)) return rej('too many transfers');
         if (j.timeMinutes > (c.maxTravelTime ?? Infinity)) return rej('over time limit');
         out.push(j); return;
@@ -156,7 +170,15 @@ export function findRoutes(origin, destination, constraints = {}, scenario = {})
   if (!ok.length) {
     res.overBudgetCheapest = best('cheapest', withBudget);
     res.status = !reachable(origin, destination) ? 'NO_ROUTE_IN_MODELED_NETWORK' : stats.complete ? 'NO_ROUTE_WITHIN_CONSTRAINTS' : 'SEARCH_INCOMPLETE';
-    res.message = res.overBudgetCheapest ? `No route has a maximum fare within ৳${c.maxBudget}. Cheapest over-budget option shown separately.` : 'No valid route under the current constraints, blocks or hop limit.';
+    if (res.overBudgetCheapest) {
+      res.message = `No route has a maximum fare within ৳${c.maxBudget}. Cheapest over-budget option shown separately.`;
+    } else if (c.allowedModes && c.allowedModes.length < 5) {
+      const modeLabels = { bus: 'Local Bus', metro: 'MRT-6 Metro', leguna: 'Leguna', rickshaw: 'Rickshaw', walking: 'Walking' };
+      const selectedNames = c.allowedModes.map((m) => modeLabels[m] || m).join(', ');
+      res.message = `No route found using selected transport mode(s): ${selectedNames}${c.singleModeOnly ? ' (single-mode only)' : ''}. Try enabling additional transport modes.`;
+    } else {
+      res.message = 'No valid route under the current constraints, blocks or hop limit.';
+    }
     return res;
   }
   res.status = stats.complete ? 'OK' : 'SEARCH_INCOMPLETE';
@@ -168,6 +190,29 @@ export function findRoutes(origin, destination, constraints = {}, scenario = {})
   }
   res.explanations.push('Cheapest = lowest estimated fare; Fastest = lowest time; Balanced = weighted score of time, fare and transfers.');
   if (!stats.complete) res.explanations.push('Search limit reached: results are partial, not proven optimal.');
+  return res;
+}
+
+/** Returns formatted list of unique transport modes used in a route */
+export function routeModes(route) {
+  if (!route || !route.legs) return [];
+  const labels = {
+    metro: 'MRT-6 Metro',
+    bus: 'Local Bus',
+    leguna: 'Leguna',
+    rickshaw: 'Rickshaw',
+    cng: 'CNG',
+    walking: 'Walking',
+  };
+  const seen = new Set();
+  const res = [];
+  for (const leg of route.legs) {
+    const key = leg.mode === 'cng' ? 'rickshaw' : leg.mode;
+    if (!seen.has(key)) {
+      seen.add(key);
+      res.push(labels[leg.mode] || leg.mode);
+    }
+  }
   return res;
 }
 

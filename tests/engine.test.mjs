@@ -36,3 +36,32 @@ assert.equal(tight.status, 'NO_ROUTE_WITHIN_CONSTRAINTS'); assert.ok(tight.overB
 // determinism
 assert.equal(JSON.stringify(findRoutes('uttara', 'jatrabari')), JSON.stringify(findRoutes('uttara', 'jatrabari')));
 console.log('All engine tests passed. Mirpur→Motijheel candidates:', r.candidateCount, r.stats);
+
+// --- New Tests for Transport Mode Filters & Preferences ---
+// 1. Single mode filter: Metro only
+const metroOnly = findRoutes('mirpur', 'motijheel', { allowedModes: ['metro'] }, {});
+assert.equal(metroOnly.status, 'OK');
+assert.ok(metroOnly.routes.fastest.legs.every((l) => l.mode === 'metro'));
+
+// 2. Single mode filter: Bus only
+const busOnly = findRoutes('mirpur', 'motijheel', { allowedModes: ['bus'] }, {});
+assert.equal(busOnly.status, 'OK');
+assert.ok(busOnly.routes.fastest.legs.every((l) => l.mode === 'bus'));
+
+// 3. Single-mode-only constraint
+const singleModeTest = findRoutes('mirpur', 'motijheel', { singleModeOnly: true }, {});
+assert.equal(singleModeTest.status, 'OK');
+for (const g of ['cheapest', 'fastest', 'balanced']) {
+  const r = singleModeTest.routes[g];
+  if (r) {
+    const modes = new Set(r.legs.map((l) => l.mode));
+    assert.equal(modes.size, 1, `Route ${g} must only have 1 transport mode`);
+  }
+}
+
+// 4. Clear message when no route exists for constrained modes (e.g. Walking from Uttara to Jatrabari)
+const walkOnly = findRoutes('uttara', 'jatrabari', { allowedModes: ['walking'] }, {});
+assert.equal(walkOnly.status, 'NO_ROUTE_WITHIN_CONSTRAINTS');
+assert.ok(walkOnly.message.includes('Walking'));
+
+console.log('All transport mode filter and single-mode tests passed successfully!');
